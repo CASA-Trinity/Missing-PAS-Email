@@ -1,0 +1,112 @@
+import pandas as pd
+import os
+import win32com.client as win32
+from datetime import datetime
+import re
+
+# File paths
+source_path = "\\\\casa.local\\DFS01\\Data\\Data Team\\Source Data\\Missing PAS\\"
+processing_path = "\\\\casa.local\\DFS01\\Data\\Data Team\\Source Data\\Missing PAS\\processing\\"
+email_list_path = "\\\\casa.local\\DFS01\\Data\\Data Team\\Source Data\\Missing PAS\\email list\\pas_email_list.xlsx"
+
+# Ensure processing directory exists
+os.makedirs(processing_path, exist_ok=True)
+
+# Function to clean filenames by removing invalid characters
+def sanitize_filename(name):
+    name = name.strip().lower()
+    name = re.sub(r"[\/:*?\"<>|]", "_", name)  # Replace invalid characters with "_"
+    name = re.sub(r"\s+", "_", name)  # Replace spaces with "_"
+    return name[:50]  # Truncate if too long
+
+# Load Data
+print("Loading data files...")
+patient_chart = pd.read_csv("C:/Power BI/Patient Chart.csv", low_memory=False, encoding="ISO-8859-1")
+patient_info = pd.read_csv("C:/Power BI/Patient Details.csv", low_memory=False, encoding="ISO-8859-1")
+pas_admission = pd.read_csv(f"{source_path}PAS Submission Admission.csv", low_memory=False, encoding="utf-8-sig")
+pas_discharge = pd.read_csv(f"{source_path}PAS Submission Discharge.csv", low_memory=False, encoding="utf-8-sig")
+progress_notes = pd.read_csv("C:/Power BI/Progress Note.csv", low_memory=False, encoding="ISO-8859-1")
+
+# Load email list
+email_list = pd.read_excel(email_list_path)
+email_list.columns = email_list.columns.str.strip()
+email_list["ProgramName"] = email_list["ProgramName"].str.lower().str.strip()
+
+# ✅ Fix ProgramName Mismatch: Remove "program: " from pas_admission & pas_discharge
+pas_admission["ProgramName"] = pas_admission["ProgramName"].str.lower().str.replace(r"^program:\s*", "", regex=True).str.strip()
+pas_discharge["ProgramName"] = pas_discharge["ProgramName"].str.lower().str.replace(r"^program:\s*", "", regex=True).str.strip()
+
+# Debugging: Print unique `ProgramName` values
+print("Unique ProgramNames in pas_admission:", pas_admission["ProgramName"].unique())
+print("Unique ProgramNames in email_list:", email_list["ProgramName"].unique())
+
+# Process Programs
+if "ProgramName" in pas_admission.columns:
+    for program in pas_admission["ProgramName"].dropna().unique():
+        clean_program = program.lower().strip()
+        safe_program = sanitize_filename(clean_program)
+
+        # Find the corresponding recipient email
+        recipient_row = email_list[email_list["ProgramName"] == clean_program]
+        if recipient_row.empty:
+            print(f"SKIPPING: No email found for program: {clean_program}")
+            continue
+        
+        recipient_email = recipient_row["Email"].values[0]
+        print(f"SENDING EMAIL TO: {recipient_email} for program: {clean_program}")
+
+        # Filter data
+        filtered_admission = pas_admission[pas_admission["ProgramName"] == clean_program]
+        filtered_discharge = pas_discharge[pas_discharge["ProgramName"] == clean_program]
+
+        # File paths
+        admission_filename = f"{processing_path}PAS_Submission_Admission_{safe_program}.csv"
+        discharge_filename = f"{processing_path}PAS_Submission_Discharge_{safe_program}.csv"
+
+        # ✅ Ensure files are saved
+        if not filtered_admission.empty:
+            filtered_admission.to_csv(admission_filename, index=False)
+            print(f"Saved: {admission_filename}")
+
+        if not filtered_discharge.empty:
+            filtered_discharge.to_csv(discharge_filename, index=False)
+            print(f"Saved: {discharge_filename}")
+
+        # ✅ Check if files exist before attaching
+        files_to_attach = []
+        if os.path.exists(admission_filename) and not filtered_admission.empty:
+            files_to_attach.append(admission_filename)
+        if os.path.exists(discharge_filename) and not filtered_discharge.empty:
+            files_to_attach.append(discharge_filename)
+
+        # Debugging: Print attached files
+        if files_to_attach:
+            print(f"ATTACHING FILES: {files_to_attach}")
+        else:
+            print(f"NO FILES TO ATTACH FOR: {clean_program}")
+
+        # ✅ Send Email via Outlook if there are attachments
+        if files_to_attach:
+            try:
+                outlook = win32.Dispatch("Outlook.Application")
+                mail = outlook.CreateItem(0)
+                mail.Subject = f"PROTECTED: {clean_program} {datetime.now().strftime('%b %#d %Y %H:%M')}"
+                mail.To = recipient_email
+                mail.HTMLBody = f"""
+                <p>Hello,</p>
+                <p>Attached are the PAS submission files for {clean_program}.</p>
+                <p>Best Regards,</p>
+                <p>The Data Team</p>
+                """
+
+                # Attach files
+                for file in files_to_attach:
+                    mail.Attachments.Add(file)
+
+                mail.Send()
+                print(f"EMAIL SENT TO: {recipient_email} for {clean_program}")
+
+            except Exception as e:
+                print(f"ERROR SENDING EMAIL to {recipient_email}: {str(e)}")
+
+print("PROCESS COMPLETED.")
